@@ -1,0 +1,1028 @@
+---
+title: Predicting Demonstration Size on Salience and Demographic Characteristics
+subtitle: 'GW DATS 6103: Introduction to Data Mining Final Project'
+author: Alexander D. Silberman
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+jupyter: python3
+---
+
+Note: Data is limited to 2017–2018, as that is the publicly-available overlap.
+
+```{python}
+# import cuml
+
+# %load_ext cuml.accel
+
+import numpy as np
+import pandas as pd
+pd.set_option('display.max_colwidth', 1000)
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+import re
+
+from census import Census
+from us import states
+
+import censusdis.data as ced
+from censusdis.datasets import ACS1_PROFILE
+from censusdis import states
+
+from statsmodels.formula.api import ols # for linear regression
+
+from sklearn.model_selection import train_test_split, KFold, GridSearchCV
+from sklearn.preprocessing import StandardScaler, LabelBinarizer
+from sklearn.linear_model import LinearRegression, LogisticRegression, LassoCV
+from sklearn.tree import DecisionTreeRegressor, DecisionTreeClassifier, plot_tree
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.decomposition import PCA
+from sklearn.metrics import classification_report, roc_curve, auc
+
+seed = 42
+```
+
+## Introduction
+
+### Objective
+To predict the size of demonstrations/protests based on metropolitan area demographics and the salience of the issue at hand.
+
+### Impact
+In recent years, protests in the US have grown in both number and scale. Being able to predict the scale of future protests would allow for a more efficient distribution of resources and would enable protesters, government institutions, first responders, and news organizations—among others—to better prepare for what is to come.
+
+## Data Acquisition and Wrangling
+
+### Results Dataset: Crowd Counting Consortium Phase 1 (2017-2020)
+
+Our results dataset: Crowd Counting Consortium Phase 1 (2017-2020): https://ash.harvard.edu/programs/crowd-counting-consortium/
+
+```{python}
+crowd_data_orig = pd.read_csv("C:/Users/alexa/Code/GW DATS/6103 12 Intro to Data Mining/Final Project/data/crowd_counting_consortium_2017-2020/ccc_compiled_20172020.csv",encoding_errors="replace")
+crowd_data_orig.head(5)
+```
+
+Keep only data for crowds that are not online and which have a crowd size, information about what the crowd gathered for, and a FIPS code.
+
+```{python}
+crowd_data = crowd_data_orig[(crowd_data_orig["issues"].notna()) & 
+                             (crowd_data_orig["size_mean"].notna()) & 
+                             (crowd_data_orig["fips_code"].notna()) &
+                             (crowd_data_orig["online"] == 0) &
+                             (crowd_data_orig["size_mean"] != 0) &
+                             (crowd_data_orig["size_mean"].notna()) &
+                             (crowd_data_orig["type"].notna())]
+crowd_data.drop(columns=np.array(["source_"]*30)+np.arange(1,31).astype(str)).isna().sum()[crowd_data.drop(columns=np.array(["source_"]*30)+np.arange(1,31).astype(str)).isna().sum() > 0]
+```
+
+```{python}
+# source_cols = np.array(["source_"]*30) + np.arange(1,31).astype(str)
+# crowd_data.drop(columns=source_cols, inplace=True)
+# crowd_data.head(5)
+# crowd_data["fips_code"] = crowd_data["fips_code"].astype(np.int16)
+# crowd_data["fips_code"]
+
+crowd_data["year"] = crowd_data["date"].apply(lambda x:x[:4]).astype(int)
+crowd_data["year"]
+```
+
+Limit to the years 2017 and 2018
+
+```{python}
+crowd_data = crowd_data[(crowd_data["year"] == 2017) | (crowd_data["year"] == 2018)]
+```
+
+Add column for `log_size_mean`
+
+```{python}
+crowd_data["log_size_mean"] = crowd_data["size_mean"].apply(np.log)
+crowd_data["log_size_mean"]
+```
+
+```{python}
+print(crowd_data["fips_code"].isna().sum(), "out of", len(crowd_data))
+```
+
+0 unresolved localities out of 16764; we need not discard any data and may cast as string.
+
+```{python}
+# crowd_data = crowd_data[crowd_data["fips_code"].notna()]
+crowd_data["fips_code"] = crowd_data["fips_code"].astype(int).astype(str).str.rjust(5,"0").astype("category")
+crowd_data["fips_code"]
+```
+
+Reindex to requisite columns
+
+```{python}
+crowd_data = crowd_data[["year","fips_code","type","issues","claims","size_mean", "log_size_mean", "size_cat"]]
+crowd_data
+```
+
+Correct mislabeled `type`s
+
+```{python}
+crowd_data_type = crowd_data["type"].str.lower()#.str.replace(r"\s+", " ", regex=True)
+
+crowd_data_type_repl_dict = {"nat'l":"national",
+                             ",":";", "/":";", " and ":";", "'":";", ":":";",
+                             "block highways":"block highway",
+                             "counter-protest":"counterprotest",
+                             "counterprotesting families belong together march":"counterprotest; march",
+                             "demonstraton":"demonstration", "demonstation":"demonstration", "demonstrations":"demonstration", "demonstarion":"demonstration", 
+                             "demonstratin":"demonstration", "deomnstration":"demonstration", "demonstartion":"demonstration",
+                             "flashmob":"flash mob",
+                             "marach":"march",
+                             "protests":"protest", "protestors":"protest", "protesst":"protest", "protest0":"protest",
+                             "protest hike":"protest; hike",
+                             "protest resignation":"protest; resignation",
+                             "protest (walk-out)":"protest; walk-out",
+                             "protest walk":"protest; walk",
+                             "raly":"rally", "rallies":"rally", "rallying":"rally",
+                             "sit-in demonstration":"sit-in",
+                             "walk in":"walk-in","walkin":"walk-in",
+                             "walk out":"walk-out", "walkout":"walk-out","walkut":"walk-out"
+                             }
+
+for key, value in crowd_data_type_repl_dict.items():
+    crowd_data_type = crowd_data_type.str.replace(key, value)
+    
+crowd_data_type = crowd_data_type.str.split(";").explode().astype(str).str.lstrip().str.rstrip()
+crowd_data_type = crowd_data_type.loc[(crowd_data_type != "nan") & (crowd_data_type != "m") & (crowd_data_type != "0.0")]
+crowd_data_type.unique()
+```
+
+```{python}
+crowd_data_orig[crowd_data_orig["type"]=="parents"]
+```
+
+Onehot encode `type`
+
+```{python}
+type_onehot = pd.get_dummies(crowd_data_type, prefix="type", drop_first=True).groupby(crowd_data_type.index).any()
+# type_onehot
+
+crowd_data = crowd_data.drop(columns="type").join(type_onehot)
+crowd_data = crowd_data[crowd_data.notna().all(axis=1)]
+crowd_data
+```
+
+Type `size_cat` as category and `size_mean` as int
+
+```{python}
+crowd_data["size_cat"] = crowd_data["size_cat"].astype("category").cat.as_ordered()
+crowd_data["size_mean"] = crowd_data["size_mean"].astype(int)
+crowd_data[["size_cat","size_mean"]]
+```
+
+Prepare `issues` for merging
+
+```{python}
+crowd_data_problems = pd.concat([crowd_data["issues"].str.split("; "),crowd_data["year"]],axis=1)
+crowd_data_problems
+```
+
+### American Community Survey 1-Year Estimates
+
+```{python}
+api_key = "29e7dfea2f8b253a0a10ccd9626f78e49f4f0a4f"
+
+def regex_filter(string, myregex):
+    if string:
+        mo = re.search(myregex, string)
+        if mo:
+            return True
+        else:
+            return False
+    else:
+        return False
+
+census_vars_orig = ced.variables.search(ACS1_PROFILE, 2017)
+census_vars = census_vars_orig[(census_vars_orig["GROUP"] != "N/A")]
+census_vars_pcts = census_vars[census_vars["VARIABLE"].apply(regex_filter,myregex=r"PE$")]
+census_vars_pcts_no_ratio = census_vars_pcts[~census_vars_pcts["LABEL"].apply(regex_filter,myregex=r"Sex\sratio")]
+
+census_vars_agg = census_vars_pcts_no_ratio[census_vars_pcts_no_ratio["LABEL"].apply(regex_filter,myregex=r"(Median)|(Mean)|(Average)|(Per\s)|(\srate)")]
+# census_vars_tot = census_vars_pcts_no_ratio[census_vars_pcts_no_ratio["LABEL"].apply(regex_filter,myregex=r"Total(?!.*\!\!)")]
+# census_vars_tot[["VARIABLE","LABEL"]]
+
+census_vars_agg[["VARIABLE","LABEL"]]
+
+census_vars_pcts_no_ratio_agg = census_vars_pcts_no_ratio.drop(census_vars_agg.index)
+
+census_vars_agg_ests = census_vars_agg["VARIABLE"].apply(lambda x:x.replace("PE","E"))
+```
+
+```{python}
+census_vars_to_drop = ["DP05_0033PE", # same as DP05_0001PE (Total Population)
+                       "DP05_0105PE", # total housing units—replace with DP05_0105E, which is the same as DP04_0001PE
+                       "DP04_0006PE", # same as DP04_0001PE	
+                       "DP04_0016PE", # same as DP04_0001PE	
+                       "DP04_0027PE", # same as DP04_0001PE	
+                       "DP04_0038PE" # same as DP04_0001PE	
+                       ]
+
+census_vars_to_add = []
+
+census_vars_pcts_no_ratio_agg_drop = census_vars_pcts_no_ratio_agg["VARIABLE"][~census_vars_pcts_no_ratio_agg["VARIABLE"].isin(census_vars_to_drop)]
+
+census_vars_final = pd.concat([pd.Series(["NAME"]), 
+                               pd.concat([census_vars_pcts_no_ratio_agg_drop, 
+                                          census_vars_agg_ests, 
+                                          pd.Series(census_vars_to_add)], 
+                                         ignore_index=True).sort_values()], 
+                              ignore_index=True)
+
+census_vars_final
+```
+
+Solely request percents. The list of variables includes what should be the total population as a percent—`DP05_0001PE`—but, as that would always be 100%, the wise people at the US Census Bureau made such equal to `DP05_0001E`, the total population estimate, necessitating no further adjustment.
+
+```{python}
+census_data = [ced.download(ACS1_PROFILE, year, census_vars_final, 
+                           metropolitan_statistical_area_micropolitan_statistical_area ="*", 
+                           api_key=api_key
+                           ).set_index("METROPOLITAN_STATISTICAL_AREA_MICROPOLITAN_STATISTICAL_AREA")
+               for year in range(2017,2019)]
+
+
+census_data = pd.concat(census_data, keys = np.arange(2017,2019), names=["year"])
+census_data
+```
+
+As per Prof. Darcy Steeg Morris' recommendation, to limit the columns to a reasonable number, all columns with any NAs will be eliminated.
+
+```{python}
+census_data = census_data.drop(columns=census_data.columns[census_data.isna().any()])
+census_data.columns.size
+```
+
+```{python}
+census_data.columns
+```
+
+### Most Important Problem Dataset, Second Release (2024)
+
+The aggregated data may be found here: https://williamslaro.github.io/talks/dataset2. Previously, the individual data was used, necessitating much preprocessing.
+
+```{python}
+issue_data = pd.read_csv("C:\\Users\\alexa\\Code\\GW DATS\\6103 12 Intro to Data Mining\\Final Project\\data\\MIPD-2024-Aggregate\\MIPDV2-All-year.csv",encoding="ANSI",
+                         index_col=["year","problem"])
+issue_data.head(20)
+```
+
+Limit to relevant years
+
+```{python}
+issue_data = issue_data.loc[[2017,2018]]
+issue_data
+```
+
+Limit to relevant columns
+
+```{python}
+issue_data_problems = issue_data[["problemname","problemdesc","problemissues","problemexamples","perc"]]
+issue_data_problems
+```
+
+Set`problemname` as a categorical variable
+
+```{python}
+issue_data_problems["problemname"] = issue_data_problems["problemname"].astype("category")
+issue_data_problems["problemname"]
+```
+
+### Merge the Datasets
+
+#### Merge Crowd and Issue Data
+
+Some crowds are gathered for issues that fit into multiple categories, organized in alphabetical order. If this is the case, how should they be merged?
+
+```{python}
+crowd_data["issues"]
+```
+
+Perhaps solely the issue with the highest salience should be accounted for? Or, perhaps, the pcts should be added, representing the salience of anyone interested in at least one of the issues?
+
+"The percentages can therefore be interpreted as the percentage of the electorate who answered the question and selected that category." -MIPDV2-Codebook p. 5
+
+The latter will be used.
+
+```{python}
+crowd_data_problems = crowd_data_problems.explode(column="issues")
+crowd_data_problems["issues"].unique()
+```
+
+All the issues in the CCC data. Each is to be mapped to a problem code in the MIPD data. This will be done by hand.
+
+But why is `covid` there? This should be limited to the years 2017 and 18.
+
+```{python}
+crowd_data[crowd_data["issues"].str.contains("covid")].reindex(columns=["issues","claims"])
+```
+
+According to the data dictionary, "These are generated after data compilation by running a series of regular expressions over the claims description text" (p. 3). These claims all include the words "reopen", "reopening", or "CDC"; these are false positives. As such, `covid` will manually be removed from these four so as to not impact findings.
+
+```{python}
+crowd_data_problems = crowd_data_problems[crowd_data_problems["issues"] != "covid"]
+```
+
+Check again for unique issues:
+
+```{python}
+crowd_data_problems["issues"].unique()
+```
+
+```{python}
+issue_data_problems
+```
+
+```{python}
+issue_code_dict = {'animal rights':13, 
+                   'banking and finance':1, 
+                   'civil rights':3,
+                   'corruption':10, 
+                   'criminal justice':3, 
+                   'democracy':10,
+                   'development':1, 
+                   'disability rights':3, 
+                   'drugs':4, 
+                   'economy':1,
+                   'education':2, 
+                   'energy':8, 
+                   'environment':8, 
+                   'foreign affairs':6,
+                   'free speech':3, 
+                   'guns':4, 
+                   'healthcare':2, 
+                   'housing':2, 
+                   'immigration':5,
+                   'indigenous peoples':12, 
+                   'judiciary':10, 
+                   'labor':1, 
+                   'legislative':10,
+                   'lgbtqia':3, 
+                   'military':6, 
+                   'patriotism':9, 
+                   'policing':3,
+                   'presidency':10,
+                   'racism':3, 
+                   'religion':9, 
+                   'reproductive rights':3, 
+                   'science':10,
+                   'sexual violence':4, 
+                   'sports':13, 
+                   'taxes':1, 
+                   'transportation':2,
+                   "women's rights":3
+}
+```
+
+```{python}
+crowd_data_problems["issues"] = crowd_data_problems["issues"].apply(np.vectorize(lambda x:issue_code_dict[x]))
+crowd_data_problems_to_merge = crowd_data_problems.reset_index().drop_duplicates() # neccessary to ensure lines with different indexes aren't deleted
+crowd_data_problems_to_merge
+```
+
+Now, this may be merged with the issue data.
+
+We want to keep the index, however, so that we may group by it later.
+
+```{python}
+crowd_problems_data_exploded = crowd_data_problems_to_merge.merge(issue_data_problems[["perc","problemname"]], how="inner", left_on=["year","issues"], right_on=["year","problem"])
+crowd_problems_data_exploded
+```
+
+Remove unused categories.
+
+```{python}
+crowd_problems_data_exploded["problemname"] = crowd_problems_data_exploded["problemname"].cat.remove_unused_categories()
+crowd_problems_data_exploded["problemname"].unique()
+```
+
+```{python}
+problems_onehot_to_group = pd.get_dummies(crowd_problems_data_exploded[["index","problemname","perc"]],columns=["problemname"]).drop(columns="problemname_Other and All")
+
+problems_onehot_cols = np.setdiff1d(problems_onehot_to_group.columns,["perc","index"])
+problems_onehot_grouped = problems_onehot_to_group.groupby(by="index").agg({"perc":"sum"} | dict(zip(problems_onehot_cols,["any"]*len(problems_onehot_cols))))
+problems_onehot_grouped
+
+# crowd_problems_perc = crowd_data.drop(columns="type").join(type_onehot)
+# crowd_problems_perc
+```
+
+```{python}
+# crowd_problems_data_exploded_to_group = crowd_problems_data_exploded[["index","problemname","perc"]]
+# # crowd_problems_data_exploded_to_group
+# crowd_problems_perc = crowd_problems_data_exploded_to_group.groupby(by="index").agg({"perc":sum,"problemname":list})
+# crowd_problems_perc
+```
+
+Lastly, merge back with original data.
+
+```{python}
+crowd_problems_data = crowd_data.merge(problems_onehot_grouped, how="inner", left_index=True, right_index=True)
+crowd_problems_data
+```
+
+#### Merge with Census Data
+
+```{python}
+cbsa_fips_crosswalk = pd.read_excel("C:\\Users\\alexa\\Code\\GW DATS\\6103 12 Intro to Data Mining\\Final Project\\data\\list1_2023.xlsx",skiprows=2,dtype=str)
+cbsa_fips_crosswalk.head()
+```
+
+```{python}
+cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS State Code"] + cbsa_fips_crosswalk["FIPS County Code"]
+cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS Code"].astype("category")
+```
+
+Set all variables as categoricals.
+
+```{python}
+cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS Code"].astype("category")
+cbsa_fips_crosswalk["CBSA Code"] = cbsa_fips_crosswalk["CBSA Code"].astype("category")
+cbsa_fips_crosswalk["FIPS State Code"] = cbsa_fips_crosswalk["FIPS State Code"].astype("category")
+```
+
+Drop NaN FIPS codes in preparation for merging.
+
+```{python}
+cbsa_fips_crosswalk = cbsa_fips_crosswalk[cbsa_fips_crosswalk["FIPS Code"].notna()]
+cbsa_fips_crosswalk["FIPS Code"]
+```
+
+```{python}
+crowd_problems_cbsa_data = crowd_problems_data.merge(cbsa_fips_crosswalk[["FIPS Code", "CBSA Code", "FIPS State Code"]], 
+                                                     how="inner", left_on="fips_code", right_on="FIPS Code").drop(columns="fips_code")
+crowd_problems_cbsa_data
+```
+
+```{python}
+demo_data = crowd_problems_cbsa_data.merge(census_data, how="inner", 
+                                           left_on = ["year","CBSA Code"], right_on = ["year","METROPOLITAN_STATISTICAL_AREA_MICROPOLITAN_STATISTICAL_AREA"])
+demo_data
+```
+
+```{python}
+demo_data.columns[demo_data.isna().any()]
+```
+
+The data has no NAs. We may proceed with modeling.
+
+```{python}
+# demo_data_clean_na_cols = demo_data_clean.columns[demo_data_clean.isna().sum() > 0]
+
+# demo_data_clean_na_dict = dict(zip(demo_data_clean_na_cols,
+#                                    demo_data_clean[demo_data_clean_na_cols].mean()))
+# demo_data_clean_na_dict
+```
+
+```{python}
+# demo_data_clean = demo_data_clean.fillna(demo_data_clean_na_dict)
+# (demo_data_clean.isna().sum() > 0).any()
+```
+
+One final step to preprocess: eliminate unused categories, then one-hot encode `CBSA Code`, `FIPS Code`, and `FIPS State Code` and eliminate all other string variables. As before, avoid multicollinearity.
+
+```{python}
+demo_data["CBSA Code"] = demo_data["CBSA Code"].astype("category")
+demo_data["FIPS Code"] = demo_data["FIPS Code"].cat.remove_unused_categories()
+demo_data["FIPS State Code"] = demo_data["FIPS State Code"].cat.remove_unused_categories()
+
+demo_data_preprocessed = pd.get_dummies(demo_data, columns=["CBSA Code","FIPS Code","FIPS State Code"], drop_first=True).drop(columns=["issues","claims","NAME"])
+demo_data_preprocessed
+```
+
+## Modeling
+
+Prepare train and test datasets
+
+```{python}
+target_cont = "log_size_mean"
+target_cat = "size_cat"
+
+targets = [target_cont, target_cat, "size_mean"]
+
+demo_train, demo_test = train_test_split(demo_data_preprocessed, 
+                                         train_size=0.8, 
+                                         random_state=seed,
+                                         stratify=demo_data_preprocessed[target_cat])
+                                         
+# reset the index
+demo_train, demo_test = demo_train.reset_index(drop=True), demo_test.reset_index(drop=True)
+
+feature_names = np.setdiff1d(demo_train.columns, targets)
+
+X_train = demo_train[feature_names].values
+X_test = demo_test[feature_names].values
+
+# Target
+y_train_cont = demo_train[target_cont].values
+y_test_cont = demo_test[target_cont].values
+
+y_train_cat = demo_train[target_cat].values
+y_test_cat = demo_test[target_cat].values
+```
+
+Standardize the features
+
+```{python}
+ss = StandardScaler()
+
+# training data
+X_train = ss.fit_transform(X_train)
+
+# test data
+X_test = ss.transform(X_test)
+```
+
+### Regression
+
+```{python}
+# problemname_cols = demo_data.columns.str.startswith("problemname")
+
+# demo_data_one_problem = demo_data_clean[demo_data_clean["issues"].apply(lambda x:len(x) == 1)]
+# demo_data_one_problem["one_problem"] = demo_data_one_problem["issues"].apply(lambda x:x[0])
+# sns.boxplot(x = 'problemname', y = target_cont, 
+#             hue = 'problemname',  
+#             data = demo_data)
+# plt.show()
+```
+
+```{python}
+sns.lmplot(x = 'perc', y = target_cont,   
+            data = demo_data,
+            fit_reg = True, scatter_kws={'alpha': 0.4, 's': 8 })
+plt.xlabel("Percent Category Labeled Most Important Problem that Year")
+plt.ylabel("Log Mean Reported Demonstration Size)")
+plt.title("Salience vs Log Mean Size")
+plt.show()
+```
+
+#### Linear Model
+
+```{python}
+ols_log_size_mean_by_perc = ols(formula = 'log_size_mean ~ perc', data = demo_data)
+ols_log_size_mean_by_perc_fit = ols_log_size_mean_by_perc.fit()
+print( ols_log_size_mean_by_perc_fit.summary() )
+```
+
+Despite having an $R^2$ of 0.001, the $F$-statistic is at 11.73—highly significant. Indeed, both the intercept and perc have very small p-values.
+
+In other words, though the percent category labeled Most Important Problem that year does not explain nearly any of the variance in the log mean reported size of demonstrations, it is nevertheless explaining some of it.
+
+```{python}
+ols_log_size_mean_by_perc_pop = ols(formula = 'log_size_mean ~ perc + DP05_0001PE', data = demo_data)
+ols_log_size_mean_by_perc_pop_fit = ols_log_size_mean_by_perc_pop.fit()
+print( ols_log_size_mean_by_perc_pop_fit.summary() )
+```
+
+Adding in population greatly boosts the predictive power.
+
+```{python}
+# ols_log_size_mean_by_all = ols(formula = 'log_size_mean ~ .', data = demo_data)
+# ols_log_size_mean_by_all_fit = ols_log_size_mean_by_all.fit()
+# print( ols_log_size_mean_by_all.summary() )
+```
+
+```{python}
+demo_lm = LinearRegression()  # instantiate
+demo_lm.fit(X_train, y_train_cont)
+print("R^2 (with the test set):", demo_lm.score(X_test, y_test_cont))
+print("R^2 (with the train set):", demo_lm.score(X_train, y_train_cont))
+```
+
+The linear model with all variables overfits; worse than the null model.
+
+##### LASSO Regression
+
+"The advantage of using a cross-validation estimator over the canonical estimator class along with grid search is that they can take advantage of warm-starting by reusing precomputed results in the previous steps of the cross-validation process. This generally leads to speed improvements" (https://scikit-learn.org/stable/glossary.html#term-cross-validation-estimator).
+
+```{python}
+demo_lasso = LassoCV(n_alphas=100, max_iter=10000, random_state=seed, n_jobs=6)
+demo_lasso.fit(X_train, y_train_cont)
+
+print('LASSO Regression model accuracy (with the test set):', demo_lasso.score(X_test, y_test_cont))
+print('LASSO Regression model accuracy (with the train set):', demo_lasso.score(X_train, y_train_cont))
+```
+
+```{python}
+# pd.DataFrame([feature_names, demo_lasso.coef_]).T.rename(columns={0:"var_name",1:"coef"}).set_index("var_name").sort_values(by="coef")
+
+lasso_coefs = pd.Series(demo_lasso.coef_,index=feature_names, name="coef")
+lasso_coefs_sort = pd.DataFrame([lasso_coefs,lasso_coefs.abs().rename("abs_coef")]).T.sort_values("abs_coef",ascending=False)
+lasso_coefs_sort = lasso_coefs_sort[lasso_coefs_sort["coef"] != 0]
+lasso_coefs_sort.head(60)
+```
+
+#### Logistic Regression
+
+```{python}
+demo_logit = LogisticRegression(penalty="l2", C=1, random_state=seed, max_iter=1000)
+demo_logit.fit(X_train, y_train_cat)
+# Cross-validation
+kfold = KFold(5, random_state = seed, shuffle = True)
+grid_logit = GridSearchCV(demo_logit, {'C': [0.001, 0.01, 0.1, 1, 5, 10, 100]}, cv = kfold, scoring = "accuracy", n_jobs=6)
+grid_logit.fit(X_train, y_train_cat)
+
+print( grid_logit.best_params_ )
+print( grid_logit.cv_results_[('mean_test_score')] )
+
+demo_logit = grid_logit.best_estimator_
+
+print('Logit model accuracy (with the test set):', demo_logit.score(X_test, y_test_cat))
+print('Logit model accuracy (with the train set):', demo_logit.score(X_train, y_train_cat))
+```
+
+### Tree
+
+#### Regression Tree
+
+```{python}
+demo_dtr = DecisionTreeRegressor(max_depth=3, random_state=seed)
+demo_dtr.fit(X_train,y_train_cont)
+demo_dtr.score(X_test,y_test_cont)
+```
+
+Run cross-validation to choose the best `max_depth` and `criterion`.
+
+```{python}
+param_grid_dtr = {'max_depth': range(3, 15)}
+                 #'criterion':('absolute_error', 'squared_error', 'friedman_mse', 'poisson')} 
+# Cross-validation
+grid_dtr = GridSearchCV(demo_dtr, param_grid_dtr, cv = kfold, scoring = None, n_jobs=6)
+grid_dtr.fit(X_train, y_train_cont)
+
+print( grid_dtr.best_params_ )
+print( grid_dtr.cv_results_[('mean_test_score')] )
+demo_dtr = grid_dtr.best_estimator_
+```
+
+```{python}
+demo_dtr.score(X_test,y_test_cont)
+```
+
+Tree does decently well, even on the test data.
+
+```{python}
+plt.figure(dpi=1000,figsize=(9,3))
+plot_tree(demo_dtr, feature_names = np.setdiff1d(demo_train.columns, targets), filled=True, max_depth=2)
+plt.show()
+```
+
+```{python}
+plt.figure(dpi=1000,figsize=(15,3))
+plot_tree(demo_dtr, feature_names = np.setdiff1d(demo_train.columns, targets), filled=True)
+plt.show()
+```
+
+`type_protest`, `type_march`, and `perc` were the three most important variables. Other important ones include `DP03_0087PE` (Mean family income in 2024 inflation-adjusted dollars)—higher has larger crowds—and `DP04_0088PE` (Percent of owner-occupied units that are worth $1,000,000 or more)—higher has larger crowds.
+
+#### Classification Tree
+
+```{python}
+demo_dtc = DecisionTreeClassifier(max_depth=3, random_state=seed)
+demo_dtc.fit(X_train,y_train_cat)
+demo_dtc.score(X_test,y_test_cat)
+```
+
+```{python}
+param_grid_dtc = {'max_depth': range(3, 15, 2),
+                  "criterion":("gini","entropy","log_loss")}
+# Cross-validation
+grid_dtc = GridSearchCV(demo_dtc, param_grid_dtc, cv = kfold, scoring = "accuracy", n_jobs=6)
+grid_dtc.fit(X_train, y_train_cat)
+
+print( grid_dtc.best_params_ )
+print( grid_dtc.cv_results_[('mean_test_score')] )
+demo_dtc = grid_dtc.best_estimator_
+```
+
+```{python}
+demo_dtc.score(X_test,y_test_cat)
+```
+
+```{python}
+plt.figure(dpi=1000,figsize=(7.5,3))
+plot_tree(demo_dtc, feature_names = np.setdiff1d(demo_train.columns, targets), filled=True, max_depth=2)
+plt.show()
+```
+
+```{python}
+plt.figure(dpi=1000,figsize=(21,3))
+plot_tree(demo_dtc, feature_names=np.setdiff1d(demo_train.columns, targets), filled=True)
+plt.show()
+```
+
+`type_protest`, `type_walk-out`, `walk-out`, and `perc` were the three most important variables. Other important ones include `type_march`, `problemname_Social Policy`.
+
+Interesting to note are `DP02_0123PE` (percent of the population 5 years or older that speaks a language at home other than English and that speaks English less than "very well")—higher percents have larger protests—and `DP02_0031PE` (percent of females 15 years old or older who are married)—higher percents have larger protests.
+
+### Random Forest
+
+#### Random Forest Regression
+
+```{python}
+demo_rfr = RandomForestRegressor(n_estimators=100, max_depth=3, random_state=seed, n_jobs=6)  # instantiate
+demo_rfr.fit(X_train, y_train_cont)
+
+print("R^2 (with the test data):", demo_rfr.score(X_test, y_test_cont))
+```
+
+```{python}
+param_grid_rf = {
+    'max_depth': [3, 5, 7, 9, 11],
+    'n_estimators': [5, 10, 15, 20, 25, 30]
+} 
+# Cross-validation
+grid_rfr = GridSearchCV(demo_rfr, param_grid_rf, cv = kfold, scoring = None, n_jobs=6)
+grid_rfr.fit(X_train, y_train_cont)
+
+print( grid_rfr.best_params_ )
+print( grid_rfr.cv_results_[('mean_test_score')] )
+demo_rfr = grid_rfr.best_estimator_
+```
+
+Best: max depth 9, 30 estimators
+
+```{python}
+demo_rfr.score(X_test, y_test_cont)
+```
+
+```{python}
+rfr_feature_imp = pd.DataFrame({'Feature': feature_names, 'Gini Importance': demo_rfr.feature_importances_}).sort_values(
+    'Gini Importance', ascending=False)
+rfr_feature_imp = rfr_feature_imp.merge(census_vars[["VARIABLE","LABEL"]], how="left", left_on="Feature", right_on="VARIABLE").drop(columns="VARIABLE").fillna("")
+rfr_feature_imp.head(20)
+```
+
+New information: `DP02_0064PE` (percent of the population 25 years old or older that has graduated from high school or the equivalent) and `DP02_0061PE` (percent of the population 25 years old or older that has a 9th–12th-grade education without a high school diploma) are also important, as is local effects (a la the categorical `FIPS Code`). Rounding out the top 20 are `DP03_0085PE` (percent of families whose income and benefits (in 2024 inflation-adjusted dollars) equal or exceed $200,000), `DP02_0065PE
+
+#### Random Forest Classification
+
+```{python}
+demo_rfc = RandomForestClassifier(n_estimators=100, max_depth=3, random_state=seed, n_jobs=6)  # instantiate
+demo_rfc.fit(X_train, y_train_cat)
+
+print('RFC model accuracy (with the test set):', demo_rfc.score(X_test, y_test_cat))
+print('RFC model accuracy (with the train set):', demo_rfc.score(X_train, y_train_cat))
+```
+
+```{python}
+# Cross-validation
+grid_rfc = GridSearchCV(demo_rfc, param_grid_rf, cv = kfold, scoring = None, n_jobs=6)
+grid_rfc.fit(X_train, y_train_cat)
+
+print( grid_rfc.best_params_ )
+print( grid_rfc.cv_results_[('mean_test_score')])
+demo_rfc = grid_rfc.best_estimator_
+```
+
+```{python}
+demo_rfc.score(X_test, y_test_cat)
+```
+
+```{python}
+rfc_feature_imp = pd.DataFrame({'Feature': feature_names, 'Gini Importance': demo_rfc.feature_importances_}).sort_values(
+    'Gini Importance', ascending=False)
+rfc_feature_imp = rfc_feature_imp.merge(census_vars[["VARIABLE","LABEL"]], how="left", left_on="Feature", right_on="VARIABLE").drop(columns="VARIABLE").fillna("")
+rfc_feature_imp.head(20)
+```
+
+Here, we see entirely different demographic variables: for some reason, the percent of occupied housing units moved into in different decades continuese to be significant.
+
+### K Nearest Neighbors
+
+#### K Nearest Neighbors Regression
+
+```{python}
+demo_knnr = KNeighborsRegressor()
+param_grid_knn = {'n_neighbors': range(1,31)} 
+# Cross-validation
+grid_knnr = GridSearchCV(demo_knnr, param_grid_knn, cv = kfold, scoring = None, n_jobs=6)
+grid_knnr.fit(X_train, y_train_cont)
+
+print( grid_knnr.best_params_ )
+print( grid_knnr.cv_results_[('mean_test_score')] )
+demo_knnr=grid_knnr.best_estimator_
+```
+
+```{python}
+demo_knnr.score(X_test, y_test_cont)
+```
+
+KNN tried its best, but it is not the correct model to use here.
+
+#### K Nearest Neighbors Classification
+
+```{python}
+demo_knnc = KNeighborsClassifier()
+# Cross-validation
+grid_knnc = GridSearchCV(demo_knnc, param_grid_knn, cv = kfold, scoring = "accuracy", n_jobs=6)
+grid_knnc.fit(X_train, y_train_cat)
+
+print( grid_knnc.best_params_ )
+print( grid_knnc.cv_results_[('mean_test_score')] )
+demo_knnc=grid_knnc.best_estimator_
+```
+
+```{python}
+demo_knnc.score(X_test, y_test_cat)
+```
+
+Barely better than chance.
+
+## Model Evaluation
+
+### Check performance metrics like Accuracy, Precision, F1-score, Recall.
+
+```{python}
+print("Logit Classification\n", classification_report( y_test_cat, demo_logit.predict(X_test), zero_division=0.0 ) )
+print("Decision Tree Classification\n", classification_report( y_test_cat, demo_dtc.predict(X_test), zero_division=0.0 ) )
+print("Random Forest Classification\n", classification_report( y_test_cat, demo_rfc.predict(X_test), zero_division=0.0 ) )
+print("K Nearest Neighbors Classification\n", classification_report( y_test_cat, demo_knnc.predict(X_test), zero_division=0.0 ) )
+```
+
+Recall of the biggest demonstration sizes is more important here, as it is better to allocate resources where they are not needed than to not when they are necessary. As such, though the best logistic regression model has a lower overall accuracy than the best decision tree classifier, as it is slightly better at predicting those larger demonstration sizes, that looks to be the best model.
+
+### Plot the One vs. Rest multiclass ROC-AUC curves for the best trained classifiers
+
+ROC-AUC can only be applied to binary classifiers. As such, a One vs. Rest strategy may be used, plotting multiple curves: one for each class, where a failure is a classification of any of the others.
+
+```{python}
+label_binarizer = LabelBinarizer().fit(y_train_cat) # sourced from https://scikit-learn.org/stable/auto_examples/model_selection/plot_roc.html
+y_test_cat_onehot = label_binarizer.transform(y_test_cat)
+# y_test_cat_onehot.shape  # (n_samples, n_classes)
+
+class_names=y_test_cat.unique().sort_values()
+
+def OvR_ROC_AUC(X_test, y_test_onehot, cat_model, cat_model_name, classes, class_names):
+    for class_of_interest in classes:
+        class_id = np.flatnonzero(label_binarizer.classes_ == class_of_interest)[0]
+        
+        fpr, tpr, _ = roc_curve(y_test_onehot[:, class_id], cat_model.predict_proba(X_test)[:, 1])
+        roc_auc = auc(fpr, tpr)
+        plt.plot(fpr, tpr, label=f"{cat_model_name} Class {class_names[class_id]} vs. the rest (AUC = {roc_auc:.2f})")
+
+    plt.plot([0, 1], [0, 1], 'r--', label='Random Guess')
+    plt.xlabel('False Positive Rate')
+    plt.ylabel('True Positive Rate')
+    plt.title(f'One-vs-Rest ROC Curves: {cat_model_name} Classifier')
+    plt.legend()
+    plt.show()
+
+OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_logit, cat_model_name="Logistic", classes=label_binarizer.classes_, class_names=class_names)
+OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_dtc, cat_model_name="Tree", classes=label_binarizer.classes_, class_names=class_names)
+OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_rfc, cat_model_name="Random Forest", classes=label_binarizer.classes_, class_names=class_names)
+OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_knnc, cat_model_name="KNN", classes=label_binarizer.classes_, class_names=class_names)
+
+
+
+# # Logit
+# fpr, tpr, _ = roc_curve(y_test_cat, demo_logit.predict_proba(X_test)[:, 1])
+# roc_auc = auc(fpr, tpr)
+# plt.plot(fpr, tpr, label=f'Logistic (AUC = {roc_auc:.2f})')
+# # Decision Tree
+# fpr, tpr, _ = roc_curve(y_test_cat, demo_dtc.predict_proba(X_test)[:, 1])
+# roc_auc = auc(fpr, tpr)
+# plt.plot(fpr, tpr, label=f'Tree (AUC = {roc_auc:.2f})')
+# # Random Forest
+# fpr, tpr, _ = roc_curve(y_test_cat, demo_rfc.predict_proba(X_test)[:, 1])
+# roc_auc = auc(fpr, tpr)
+# plt.plot(fpr, tpr, label=f'Random Forest (AUC = {roc_auc:.2f})')
+# # KNN
+# fpr, tpr, _ = roc_curve(y_test_cat, demo_knnc.predict_proba(X_test)[:, 1])
+# roc_auc = auc(fpr, tpr)
+# plt.plot(fpr, tpr, label=f'KNN (AUC = {roc_auc:.2f})')
+
+# plt.plot([0, 1], [0, 1], 'r--', label='Random Guess')
+# plt.xlabel('False Positive Rate')
+# plt.ylabel('True Positive Rate')
+# plt.title('ROC Curves for Two Models')
+# plt.legend()
+# plt.show()
+```
+
+Judging by the ROC-AUC curves, the best decision tree would appear to be the best model. It is the worst at predicting Class 1s, but as that is the smallest class, it is the least essential to distribute resources appropriately for.
+
+### Plot the residuals for the best trained regressors
+
+```{python}
+# linear model
+plt.scatter(y_test_cont, y_test_cont - demo_lm.predict(X_test))
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("True Value")
+plt.ylabel('Residual')
+plt.title("Linear Model Residuals")
+plt.show()
+
+# tree
+plt.scatter(y_test_cont, y_test_cont - demo_dtr.predict(X_test))
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("True Value")
+plt.ylabel('Residual')
+plt.title("Decision Tree Residuals")
+plt.show()
+
+# random forest
+plt.scatter(y_test_cont, y_test_cont - demo_rfr.predict(X_test))
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("True Value")
+plt.ylabel('Residual')
+plt.title("Random Forest Residuals")
+plt.show()
+
+# knn
+plt.scatter(y_test_cont, y_test_cont - demo_knnr.predict(X_test))
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("True Value")
+plt.ylabel('Residual')
+plt.title("K Nearest Neighbors Residuals")
+plt.show()
+```
+
+The residuals all have a clear direction. The linear model appears flattest, but only because it is squashed to show all of the residuals.
+
+```{python}
+print("R^2 With the Test Data")
+print(f"Linear Model: {demo_lm.score(X_test,y_test_cont):.2f}")
+print(f"Decision Tree: {demo_dtr.score(X_test,y_test_cont):.2f}")
+print(f"Random Forest: {demo_rfr.score(X_test,y_test_cont):.2f}")
+print(f"K Nearest Neighbors: {demo_knnr.score(X_test,y_test_cont):.2f}")
+```
+
+Random Forest explains the most variance. The linear model is worse than the null model, and the KNN regressor is not far off.
+
+## Dimensionality Reduction
+
+### Primary Component Analysis
+
+```{python}
+# PCA Computations
+# X_avg = np.mean(X_train, axis = 0)
+# B = X_train - np.tile(X_avg, (len(X_train), 1))
+
+# U, S, VT = np.linalg.svd(B / np.sqrt(len(X_train)), full_matrices=True)
+# V = VT.T
+
+# #t = np.arange(0, 1, 0.1)
+# # plt.plot(t, V[1, 0]/V[0, 0] * t)
+# # plt.plot(t, V[1, 1]/V[0, 1] * t)
+# plt.quiver([X_avg[0], X_avg[0]], [X_avg[1],X_avg[1]], V[0,:], V[1,:], scale=8, zorder=2, color=['b', 'r'])
+# plt.show()
+
+# theta = 2 * np.pi * np.arange(0, 1, 0.01)
+# Xstd = np.array([np.cos(theta), np.sin(theta)]).T @ np.diag(S) @ VT
+
+# plt.plot(Xavg[0] +     Xstd[:, 0], Xavg[1] +     Xstd[:,1])
+# plt.plot(Xavg[0] + 2 * Xstd[:, 0], Xavg[1] + 2 * Xstd[:,1])
+# plt.plot(Xavg[0] + 3 * Xstd[:, 0], Xavg[1] + 3 * Xstd[:,1])
+# plt.show()
+```
+
+```{python}
+demo_pca = PCA(n_components=0.95)  # Retain 95% of variance
+demo_pca.fit(X_train)
+
+X_train_pca = demo_pca.transform(X_train)
+X_test_pca = demo_pca.transform(X_test)
+```
+
+```{python}
+pca_lm = LinearRegression()
+pca_lm.fit(X_train_pca,y_train_cont)
+
+print("R^2 (with the test set):", pca_lm.score(X_test_pca, y_test_cont))
+print("R^2 (with the train set):", pca_lm.score(X_train_pca, y_train_cont))
+```
+
+```{python}
+pca_logit = LogisticRegression(penalty="l2", C=1, random_state=seed, max_iter=10000)
+pca_logit.fit(X_train_pca,y_train_cat)
+
+# Cross-validation
+grid_logit = GridSearchCV(pca_logit, {'C': [0.001, 0.01, 0.1, 1, 5, 10, 100]}, cv = kfold, scoring = "accuracy", n_jobs=6)
+grid_logit.fit(X_train_pca, y_train_cat)
+
+print( grid_logit.best_params_ )
+print( grid_logit.cv_results_[('mean_test_score')] )
+
+pca_logit = grid_logit.best_estimator_
+
+print('Logit model accuracy (with the test set):', pca_logit.score(X_test_pca, y_test_cat))
+print('Logit model accuracy (with the train set):', pca_logit.score(X_train_pca, y_train_cat))
+```
+
+```{python}
+print("Logit Classification\n", classification_report( y_test_cat, pca_logit.predict(X_test_pca) ) )
+```
+
+Slightly worse accuracy, at the advantage of a higher recall for Class 3 and 4.
+
+```{python}
+OvR_ROC_AUC(X_test_pca, y_test_cat_onehot, cat_model=pca_logit, cat_model_name="PCA Logistic", classes=label_binarizer.classes_, class_names=class_names)
+```
+
