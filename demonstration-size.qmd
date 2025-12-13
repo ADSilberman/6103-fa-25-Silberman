@@ -4,13 +4,12 @@ subtitle: 'GW DATS 6103: Introduction to Data Mining Final Project'
 author: Alexander D. Silberman
 date: today
 format:
-  html:
+  pdf:
     toc: true
-    code-fold: true
+    code-fold: false
 jupyter: python3
 ---
 
-Note: Data is limited to 2017–2018, as that is the publicly-available overlap.
 
 ```{python}
 # import cuml
@@ -25,12 +24,12 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 
-from census import Census
-from us import states
+# from census import Census
+# from us import states
 
 import censusdis.data as ced
 from censusdis.datasets import ACS1_PROFILE
-from censusdis import states
+# from censusdis import states
 
 from statsmodels.formula.api import ols # for linear regression
 
@@ -48,24 +47,26 @@ seed = 42
 
 ## Introduction
 
-### Objective
-To predict the size of demonstrations/protests based on metropolitan area demographics and the salience of the issue at hand.
+In recent years, demonstrations in the US have grown in both number and scale (*Crowd Counting Consortium*, 2024). Being able to predict the scale of future demonstrations would allow for a more efficient distribution of resources and would enable protesters, government institutions, first responders, and news organizations—among others—to better prepare for what is to come.
 
-### Impact
-In recent years, protests in the US have grown in both number and scale. Being able to predict the scale of future protests would allow for a more efficient distribution of resources and would enable protesters, government institutions, first responders, and news organizations—among others—to better prepare for what is to come.
+In an analysis of Chilean demonstrations between 2000 and 2012, Somma & Medel found that demonstrations targeting broader issues had larger crowd sizes (2018). In other words, demonstrations surrounding issues that larger portions of the population care about tend to be larger in scale. An opposing arrow of causality was drawn by Carey, Jr. et al. (2014), which pointed to a rise in the salience of immigration among U.S. Latinos following the 2006 immigration protests. In either case, there is some evidence to suggest that increased salience corresponds with increased crowd sizes, and may thereby be useful in predicting such.
+
+In general, however, in spite of the importance of this topic, little work has been done on predicting the size of demonstrations, as noted by Somma & Medel (2018, pp. 2–3).
+
+The SMART question at the heart of this analysis is as follows: is it possible to predict the size of crowds at demonstrations—as measured in either raw number or magnitude—for the years 2017 and 2018 based on salience of the issue(s) at hand, as indicated by the percent of the population who labeled that category Most Important Problem that year, and demographic data at the county level for that year, as sourced from the American Community Survey (ACS) 1-year estimates? 
 
 ## Data Acquisition and Wrangling
 
 ### Results Dataset: Crowd Counting Consortium Phase 1 (2017-2020)
 
-Our results dataset: Crowd Counting Consortium Phase 1 (2017-2020): https://ash.harvard.edu/programs/crowd-counting-consortium/
+The dataset which originates the target variables of this study is that of the Crowd Counting Consortium (CCC) Phase 1 (2017-2020). This dataset, published by Harvard Kennedy School's Ash Center for Democratic Governance and Innovation and the University of Connecticut, derives information on gatherings from news articles, recording high, low, and mean estimates for crowd size, accounting for vagaries in descriptions, as well as their claimed purpose(s) (Chenoweth et al., 2025). Other information is also collected, such as whether the events resulted in any arrests and the actors forming such crowds, but those are irrelevant for the purposes of this study.
 
 ```{python}
 crowd_data_orig = pd.read_csv("C:/Users/alexa/Code/GW DATS/6103 12 Intro to Data Mining/Final Project/data/crowd_counting_consortium_2017-2020/ccc_compiled_20172020.csv",encoding_errors="replace")
 crowd_data_orig.head(5)
 ```
 
-Keep only data for crowds that are not online and which have a crowd size, information about what the crowd gathered for, and a FIPS code.
+Only data for crowds that aren't online with a crowd size, information about what the crowd gathered for, and a FIPS code is kept. Also, the data is rid of `source` columns, as they are irrelevant for our purposes.
 
 ```{python}
 crowd_data = crowd_data_orig[(crowd_data_orig["issues"].notna()) & 
@@ -75,7 +76,8 @@ crowd_data = crowd_data_orig[(crowd_data_orig["issues"].notna()) &
                              (crowd_data_orig["size_mean"] != 0) &
                              (crowd_data_orig["size_mean"].notna()) &
                              (crowd_data_orig["type"].notna())]
-crowd_data.drop(columns=np.array(["source_"]*30)+np.arange(1,31).astype(str)).isna().sum()[crowd_data.drop(columns=np.array(["source_"]*30)+np.arange(1,31).astype(str)).isna().sum() > 0]
+crowd_data = crowd_data.drop(columns=np.array(["source_"]*30)+np.arange(1,31).astype(str))
+crowd_data.isna().sum()[crowd_data.isna().sum() > 0]
 ```
 
 ```{python}
@@ -89,24 +91,34 @@ crowd_data["year"] = crowd_data["date"].apply(lambda x:x[:4]).astype(int)
 crowd_data["year"]
 ```
 
-Limit to the years 2017 and 2018
+The data is limited to the years 2017 and 2018, as that is the overlap available to us between these three disparate datasets.
 
 ```{python}
 crowd_data = crowd_data[(crowd_data["year"] == 2017) | (crowd_data["year"] == 2018)]
 ```
 
-Add column for `log_size_mean`
+```{python}
+sns.histplot(data=crowd_data, x="size_mean", bins=[0, 5, 10, 20, 50, 100, 250, 500, 1000, 5000, 10000, 50000, 100000, 500000, 1000000, 5000000])
+plt.show()
+```
+
+As is to be expected, the data is extremely right-skewed. A column is added for `log_size_mean`, for a target variable that more closely approximates a normal distribution (as is assumed by e.g. linear regression).
 
 ```{python}
 crowd_data["log_size_mean"] = crowd_data["size_mean"].apply(np.log)
-crowd_data["log_size_mean"]
+sns.histplot(data=crowd_data, x="log_size_mean")
+plt.show()
 ```
+
+It is still right-skewed, but much better. 
+
+Next, the FIPS codes are corrected.
 
 ```{python}
 print(crowd_data["fips_code"].isna().sum(), "out of", len(crowd_data))
 ```
 
-0 unresolved localities out of 16764; we need not discard any data and may cast as string.
+There are 0 unresolved counties out of 16703; we need not discard any data and may proceed to cast the column as strings.
 
 ```{python}
 # crowd_data = crowd_data[crowd_data["fips_code"].notna()]
@@ -114,14 +126,16 @@ crowd_data["fips_code"] = crowd_data["fips_code"].astype(int).astype(str).str.rj
 crowd_data["fips_code"]
 ```
 
-Reindex to requisite columns
+Many of these columns are unused in the final product; the data is thereby reindexed to the requisite columns.
 
 ```{python}
 crowd_data = crowd_data[["year","fips_code","type","issues","claims","size_mean", "log_size_mean", "size_cat"]]
-crowd_data
+crowd_data.head(5)
 ```
 
-Correct mislabeled `type`s
+Mislabeled and misspelled `type`s are corrected, then the strings are split into lists of `type`s.
+
+For a Harvard dataset, there is much that must be cleaned up. Perhaps such problems were fixed in later phases of the research.
 
 ```{python}
 crowd_data_type = crowd_data["type"].str.lower()#.str.replace(r"\s+", " ", regex=True)
@@ -158,7 +172,7 @@ crowd_data_type.unique()
 crowd_data_orig[crowd_data_orig["type"]=="parents"]
 ```
 
-Onehot encode `type`
+It is unclear as to what it means for a crowd to be of `type` "parents" having `actors` that are teachers and students.
 
 ```{python}
 type_onehot = pd.get_dummies(crowd_data_type, prefix="type", drop_first=True).groupby(crowd_data_type.index).any()
@@ -166,10 +180,10 @@ type_onehot = pd.get_dummies(crowd_data_type, prefix="type", drop_first=True).gr
 
 crowd_data = crowd_data.drop(columns="type").join(type_onehot)
 crowd_data = crowd_data[crowd_data.notna().all(axis=1)]
-crowd_data
+crowd_data.head(5)
 ```
 
-Type `size_cat` as category and `size_mean` as int
+`type` is one-shot encoded. To prevent multicollinearity, the first category—`"drive"`—is dropped.
 
 ```{python}
 crowd_data["size_cat"] = crowd_data["size_cat"].astype("category").cat.as_ordered()
@@ -177,14 +191,21 @@ crowd_data["size_mean"] = crowd_data["size_mean"].astype(int)
 crowd_data[["size_cat","size_mean"]]
 ```
 
-Prepare `issues` for merging
+`size_cat` is typed as a category and `size_mean` as an integer.
 
 ```{python}
 crowd_data_problems = pd.concat([crowd_data["issues"].str.split("; "),crowd_data["year"]],axis=1)
-crowd_data_problems
+crowd_data_problems = crowd_data_problems.explode(column="issues")
+crowd_data_problems.head(20)
 ```
 
-### American Community Survey 1-Year Estimates
+`issues` is prepared for merging by splitting and exploding, segmenting it off into its own dataframe (with `year`) to save space and time when merging.
+
+### American Community Survey (ACS) 1-Year Estimates
+
+The American Community Survey is a comprehensive yearly survey conducted by the U.S. Census Bureau. For the purposes of this project, we will be looking at the 1-year estimates for the most up-to-date demographic data, and analyzing all variables found in the five Data Profiles, as they are selected subsets that capture various potentially-relevant information for our purposes: social, economic, housing, and demographic characteristics (U.S. Census Bureau, 2017, 2018).
+
+This data is aggregated at the county level, as that is the smallest unit for which the majority of the locations found in the CCC dataset have data.
 
 ```{python}
 api_key = "29e7dfea2f8b253a0a10ccd9626f78e49f4f0a4f"
@@ -208,12 +229,16 @@ census_vars_agg = census_vars_pcts_no_ratio[census_vars_pcts_no_ratio["LABEL"].a
 # census_vars_tot = census_vars_pcts_no_ratio[census_vars_pcts_no_ratio["LABEL"].apply(regex_filter,myregex=r"Total(?!.*\!\!)")]
 # census_vars_tot[["VARIABLE","LABEL"]]
 
-census_vars_agg[["VARIABLE","LABEL"]]
+# census_vars_agg[["VARIABLE","LABEL"]]
 
 census_vars_pcts_no_ratio_agg = census_vars_pcts_no_ratio.drop(census_vars_agg.index)
 
 census_vars_agg_ests = census_vars_agg["VARIABLE"].apply(lambda x:x.replace("PE","E"))
 ```
+
+The variables are limited to percent estimates—those variables ending in `PE`—excepting those that have no percent estimates, e.g. aggregate variables like medians; for those, the estimates—variables ending solely in `E`—are taken instead. Variables representing population totals—that would have percent estimates of 100%—instead have percent estimates equivalent to their estimates, so these do not need to be altered.
+
+The variables representing ratios are also eliminated.
 
 ```{python}
 census_vars_to_drop = ["DP05_0033PE", # same as DP05_0001PE (Total Population)
@@ -224,70 +249,90 @@ census_vars_to_drop = ["DP05_0033PE", # same as DP05_0001PE (Total Population)
                        "DP04_0038PE" # same as DP04_0001PE	
                        ]
 
-census_vars_to_add = []
+# census_vars_to_add = []
 
 census_vars_pcts_no_ratio_agg_drop = census_vars_pcts_no_ratio_agg["VARIABLE"][~census_vars_pcts_no_ratio_agg["VARIABLE"].isin(census_vars_to_drop)]
 
 census_vars_final = pd.concat([pd.Series(["NAME"]), 
                                pd.concat([census_vars_pcts_no_ratio_agg_drop, 
                                           census_vars_agg_ests, 
-                                          pd.Series(census_vars_to_add)], 
-                                         ignore_index=True).sort_values()], 
+                                        #   pd.Series(census_vars_to_add)
+                                        ], ignore_index=True).sort_values()], 
                               ignore_index=True)
 
 census_vars_final
 ```
 
-Solely request percents. The list of variables includes what should be the total population as a percent—`DP05_0001PE`—but, as that would always be 100%, the wise people at the US Census Bureau made such equal to `DP05_0001E`, the total population estimate, necessitating no further adjustment.
+Variables are eliminated which repeat information seen elsewhere in the data. After doing so, there are 666 still remaining.
 
 ```{python}
-census_data = [ced.download(ACS1_PROFILE, year, census_vars_final, 
-                           metropolitan_statistical_area_micropolitan_statistical_area ="*", 
-                           api_key=api_key
-                           ).set_index("METROPOLITAN_STATISTICAL_AREA_MICROPOLITAN_STATISTICAL_AREA")
-               for year in range(2017,2019)]
+census_data_orig = [ced.download(ACS1_PROFILE, year, census_vars_final, 
+                                 state = "*", county ="*", 
+                                 api_key=api_key
+                                 ).set_index(["STATE","COUNTY"])
+                    for year in range(2017,2019)]
 
 
-census_data = pd.concat(census_data, keys = np.arange(2017,2019), names=["year"])
-census_data
+census_data_orig = pd.concat(census_data_orig, keys = np.arange(2017,2019), names=["year"])
+census_data_orig
 ```
 
-As per Prof. Darcy Steeg Morris' recommendation, to limit the columns to a reasonable number, all columns with any NAs will be eliminated.
+Data is pulled for each of the two years for which we have data in all of the datasets, then concatenated into one dataframe, with their respective years as their keys.
+
+Notably, data for the year of 2020 is absent, due to difficulties surrounding the COVID-19 Pandemic.
+
+Though `DP02PR` originates from the Puerto Rico Community Survey (PRCS) and not the American Community Survey (ACS), with some differences as to how answers are collected and the exact language used, the columns are identical to the ones found in `DP02`. As such, rather than discard data from the 16 crowds in the CCC dataset located in Puerto Rico, each is mapped to their corresponding `DP02` variable, with the `DP02PR` columns then being dropped.
+
+```{python}
+pr_cols = census_data_orig.columns[census_data_orig.columns.str.startswith("DP02PR_")]
+
+census_data_pr = census_data_orig[pr_cols][census_data_orig["DP02PR_0001PE"].isna() == False]
+census_data_pr = census_data_pr.rename(columns=dict(zip(pr_cols, pr_cols.str.replace("PR",""))))
+
+census_data_no_pr = census_data_orig.drop(columns=pr_cols)
+
+census_data = census_data_no_pr.combine_first(census_data_pr)
+census_data[(census_data_orig["DP02PR_0001PE"].isna() == False).reindex(census_data.index)]
+```
+
+As per Prof. Darcy Steeg Morris' recommendation, to limit the columns to a reasonable number, all columns with any NAs are eliminated. Largely, these are small variables, such as `DP05_0042PE`: the percent of the population in Navajo tribes. She suggested that these may be left out intentionally due to privacy concerns.
 
 ```{python}
 census_data = census_data.drop(columns=census_data.columns[census_data.isna().any()])
 census_data.columns.size
 ```
 
-```{python}
-census_data.columns
-```
+After eliminating, there are 246 columns remaining.
 
-### Most Important Problem Dataset, Second Release (2024)
+### Most Important Problem Dataset (MIPD), Second Release (2024)
+
+The second release of the Most Important Problem Dataset (MIPD) contains data from roughly 850 surveys and numerous institutions from between 1939 and 2020. Though reliability will vary by survey, as the question (or variants thereof) have been asked consistently across so many decades, it is a rich source from which to mine to understand salience among the American public (Heffington et al., 2017; "The 'Most Important Problem' Dataset (MIPD): A New Dataset on American Issue Importance," n.d.; Yildirim & Williams, 2025).
+
+The data comprises a list of 12 general quasi-responses, as well as one representing "other", one representing "NaN", and one representing those who refused to answer, for each year. Each of these are granted descriptions, issues, and examples, as well as the percent of total respondents asked the question in the given year who gave that answer (Heffington et al., 2017; "The 'Most Important Problem' Dataset (MIPD): A New Dataset on American Issue Importance," n.d.; Yildirim & Williams, 2025).
 
 The aggregated data may be found here: https://williamslaro.github.io/talks/dataset2. Previously, the individual data was used, necessitating much preprocessing.
 
 ```{python}
 issue_data = pd.read_csv("C:\\Users\\alexa\\Code\\GW DATS\\6103 12 Intro to Data Mining\\Final Project\\data\\MIPD-2024-Aggregate\\MIPDV2-All-year.csv",encoding="ANSI",
                          index_col=["year","problem"])
-issue_data.head(20)
-```
-
-Limit to relevant years
-
-```{python}
-issue_data = issue_data.loc[[2017,2018]]
 issue_data
 ```
 
-Limit to relevant columns
+The data is limited to the relevant years. Though the paper covers years ranging from 1939 to 2020, data for the years 2019 and 2020 are absent from the aggregated dataset. To quote Laron K. Williams: "Unfortunately, it is a product of polling companies choosing to monetize the data rather than posting them in a free public repository (like the Roper Center)" (personal communication, November 20, 2025).
+
+```{python}
+issue_data = issue_data.loc[[2017,2018]]
+issue_data.head(5)
+```
+
+The data is limited to the relevant columns, including those describing the problems, for reference.
 
 ```{python}
 issue_data_problems = issue_data[["problemname","problemdesc","problemissues","problemexamples","perc"]]
 issue_data_problems
 ```
 
-Set`problemname` as a categorical variable
+`problemname` is set as a categorical variable.
 
 ```{python}
 issue_data_problems["problemname"] = issue_data_problems["problemname"].astype("category")
@@ -298,45 +343,36 @@ issue_data_problems["problemname"]
 
 #### Merge Crowd and Issue Data
 
-Some crowds are gathered for issues that fit into multiple categories, organized in alphabetical order. If this is the case, how should they be merged?
+Some crowds are gathered for issues that fit into multiple categories, organized in alphabetical order.
 
 ```{python}
 crowd_data["issues"]
 ```
 
-Perhaps solely the issue with the highest salience should be accounted for? Or, perhaps, the pcts should be added, representing the salience of anyone interested in at least one of the issues?
-
-"The percentages can therefore be interpreted as the percentage of the electorate who answered the question and selected that category." -MIPDV2-Codebook p. 5
-
-The latter will be used.
+It is unclear how these should best be merged. Perhaps solely the issue with the highest salience should be accounted for. However, for the purposes of this project, it was decided the percents should be added, representing the percent of the population who would judge at least one of the issues at play to be a part of the Most Important Problem for that year. As the MIPDV2 Codebook states: "The percentages can therefore be interpreted as the percentage of the electorate who answered the question and selected that category" (p. 5).
 
 ```{python}
-crowd_data_problems = crowd_data_problems.explode(column="issues")
-crowd_data_problems["issues"].unique()
+np.sort(crowd_data_problems["issues"].unique())
 ```
 
-All the issues in the CCC data. Each is to be mapped to a problem code in the MIPD data. This will be done by hand.
+Every issue present in the CCC data is presented above. Each is to be mapped to a problem code in the MIPD data. This will be done by hand.
 
-But why is `covid` there? This should be limited to the years 2017 and 18.
+The presence of `covid` is confusing, however, as this should be limited to the years 2017 and 18.
 
 ```{python}
 crowd_data[crowd_data["issues"].str.contains("covid")].reindex(columns=["issues","claims"])
 ```
 
-According to the data dictionary, "These are generated after data compilation by running a series of regular expressions over the claims description text" (p. 3). These claims all include the words "reopen", "reopening", or "CDC"; these are false positives. As such, `covid` will manually be removed from these four so as to not impact findings.
+According to the data dictionary, "These are generated after data compilation by running a series of regular expressions over the claims description text" (p. 3). These claims all include the words "reopen", "reopening", or "CDC"; these may thereby be taken to be false positives. As such, `covid` will manually be removed from these four so as to not impact findings.
 
 ```{python}
 crowd_data_problems = crowd_data_problems[crowd_data_problems["issues"] != "covid"]
 ```
 
-Check again for unique issues:
+Once more, the data is checked for unique issues.
 
 ```{python}
-crowd_data_problems["issues"].unique()
-```
-
-```{python}
-issue_data_problems
+np.sort(crowd_data_problems["issues"].unique())
 ```
 
 ```{python}
@@ -386,21 +422,21 @@ crowd_data_problems_to_merge = crowd_data_problems.reset_index().drop_duplicates
 crowd_data_problems_to_merge
 ```
 
-Now, this may be merged with the issue data.
+The mapping is applied, but some lists of `issues` will have multiple map to the same `problem`. As such, before they can be re-grouped, duplicates must be deleted; to that end, `index` is turned into a column with `reset_index()`, so that only those which also have duplicate indices are removed.
 
-We want to keep the index, however, so that we may group by it later.
+`index` is also necessary to merge this dataframe back with `crowd_data`.
 
 ```{python}
 crowd_problems_data_exploded = crowd_data_problems_to_merge.merge(issue_data_problems[["perc","problemname"]], how="inner", left_on=["year","issues"], right_on=["year","problem"])
 crowd_problems_data_exploded
 ```
 
-Remove unused categories.
-
 ```{python}
 crowd_problems_data_exploded["problemname"] = crowd_problems_data_exploded["problemname"].cat.remove_unused_categories()
 crowd_problems_data_exploded["problemname"].unique()
 ```
+
+Unused categories must be removed before one-hot encoding, as, otherwise, categories that are not used will get their own columns, filled completely with `False`s.
 
 ```{python}
 problems_onehot_to_group = pd.get_dummies(crowd_problems_data_exploded[["index","problemname","perc"]],columns=["problemname"]).drop(columns="problemname_Other and All")
@@ -413,64 +449,69 @@ problems_onehot_grouped
 # crowd_problems_perc
 ```
 
-```{python}
-# crowd_problems_data_exploded_to_group = crowd_problems_data_exploded[["index","problemname","perc"]]
-# # crowd_problems_data_exploded_to_group
-# crowd_problems_perc = crowd_problems_data_exploded_to_group.groupby(by="index").agg({"perc":sum,"problemname":list})
-# crowd_problems_perc
-```
+Much like `type` was before, the one-hot encoded columns and `perc` are grouped so that, once again, each one `index` corresponds to exactly one row.
 
 Lastly, merge back with original data.
 
 ```{python}
 crowd_problems_data = crowd_data.merge(problems_onehot_grouped, how="inner", left_index=True, right_index=True)
-crowd_problems_data
+crowd_problems_data.head(5)
 ```
 
 #### Merge with Census Data
 
 ```{python}
-cbsa_fips_crosswalk = pd.read_excel("C:\\Users\\alexa\\Code\\GW DATS\\6103 12 Intro to Data Mining\\Final Project\\data\\list1_2023.xlsx",skiprows=2,dtype=str)
-cbsa_fips_crosswalk.head()
+# cbsa_fips_crosswalk = pd.read_excel("C:\\Users\\alexa\\Code\\GW DATS\\6103 12 Intro to Data Mining\\Final Project\\data\\list1_2023.xlsx",skiprows=2,dtype=str)
+# cbsa_fips_crosswalk.head()
 ```
 
 ```{python}
-cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS State Code"] + cbsa_fips_crosswalk["FIPS County Code"]
-cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS Code"].astype("category")
+# cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS State Code"] + cbsa_fips_crosswalk["FIPS County Code"]
+# cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS Code"].astype("category")
 ```
 
-Set all variables as categoricals.
+<!-- Set all variables as categoricals. -->
 
 ```{python}
-cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS Code"].astype("category")
-cbsa_fips_crosswalk["CBSA Code"] = cbsa_fips_crosswalk["CBSA Code"].astype("category")
-cbsa_fips_crosswalk["FIPS State Code"] = cbsa_fips_crosswalk["FIPS State Code"].astype("category")
+# cbsa_fips_crosswalk["FIPS Code"] = cbsa_fips_crosswalk["FIPS Code"].astype("category")
+# cbsa_fips_crosswalk["CBSA Code"] = cbsa_fips_crosswalk["CBSA Code"].astype("category")
+# cbsa_fips_crosswalk["FIPS State Code"] = cbsa_fips_crosswalk["FIPS State Code"].astype("category")
 ```
 
-Drop NaN FIPS codes in preparation for merging.
+<!-- Drop NaN FIPS codes in preparation for merging. -->
 
 ```{python}
-cbsa_fips_crosswalk = cbsa_fips_crosswalk[cbsa_fips_crosswalk["FIPS Code"].notna()]
-cbsa_fips_crosswalk["FIPS Code"]
-```
-
-```{python}
-crowd_problems_cbsa_data = crowd_problems_data.merge(cbsa_fips_crosswalk[["FIPS Code", "CBSA Code", "FIPS State Code"]], 
-                                                     how="inner", left_on="fips_code", right_on="FIPS Code").drop(columns="fips_code")
-crowd_problems_cbsa_data
+# cbsa_fips_crosswalk = cbsa_fips_crosswalk[cbsa_fips_crosswalk["FIPS Code"].notna()]
+# cbsa_fips_crosswalk["FIPS Code"]
 ```
 
 ```{python}
-demo_data = crowd_problems_cbsa_data.merge(census_data, how="inner", 
-                                           left_on = ["year","CBSA Code"], right_on = ["year","METROPOLITAN_STATISTICAL_AREA_MICROPOLITAN_STATISTICAL_AREA"])
-demo_data
+# crowd_problems_cbsa_data = crowd_problems_data.merge(cbsa_fips_crosswalk[["FIPS Code", "CBSA Code", "FIPS State Code"]], 
+#                                                      how="inner", left_on="fips_code", right_on="FIPS Code").drop(columns="fips_code")
+# crowd_problems_cbsa_data
+```
+
+```{python}
+census_data = census_data.reset_index()
+```
+
+```{python}
+census_data["fips_code"] = census_data["STATE"]+census_data["COUNTY"]
+census_data["fips_code"]
+```
+
+A single `fips_code` column is created so that the datasets may be merged one last time.
+
+```{python}
+demo_data = crowd_problems_data.merge(census_data, how="inner", on = ["year","fips_code"])
+demo_data.head(5)
 ```
 
 ```{python}
 demo_data.columns[demo_data.isna().any()]
 ```
 
-The data has no NAs. We may proceed with modeling.
+As the columns with NAs have been eliminated previously, the data is clean.
 
 ```{python}
 # demo_data_clean_na_cols = demo_data_clean.columns[demo_data_clean.isna().sum() > 0]
@@ -485,20 +526,21 @@ The data has no NAs. We may proceed with modeling.
 # (demo_data_clean.isna().sum() > 0).any()
 ```
 
-One final step to preprocess: eliminate unused categories, then one-hot encode `CBSA Code`, `FIPS Code`, and `FIPS State Code` and eliminate all other string variables. As before, avoid multicollinearity.
+One final step to preprocess: eliminate unused categories, then one-hot encode `NAME` and `STATE` and eliminate all other string variables—including `fips_code`, which, post-merging, is no longer necessary (and is perfectly collinear with `NAME`.). As before, multicollinearity is avoided.
 
 ```{python}
-demo_data["CBSA Code"] = demo_data["CBSA Code"].astype("category")
-demo_data["FIPS Code"] = demo_data["FIPS Code"].cat.remove_unused_categories()
-demo_data["FIPS State Code"] = demo_data["FIPS State Code"].cat.remove_unused_categories()
+demo_data["NAME"] = demo_data["NAME"].astype("category")
+demo_data["STATE"] = demo_data["STATE"].astype("category")
 
-demo_data_preprocessed = pd.get_dummies(demo_data, columns=["CBSA Code","FIPS Code","FIPS State Code"], drop_first=True).drop(columns=["issues","claims","NAME"])
+demo_data_preprocessed = pd.get_dummies(demo_data, columns=["NAME","STATE"], drop_first=True).drop(columns=["issues","claims","fips_code"])
 demo_data_preprocessed
 ```
 
-## Modeling
+```{python}
+# np.setdiff1d(demo_data["NAME"], demo_data["NAME"].drop_duplicates(keep=False))
+```
 
-Prepare train and test datasets
+## Modeling
 
 ```{python}
 target_cont = "log_size_mean"
@@ -527,7 +569,7 @@ y_train_cat = demo_train[target_cat].values
 y_test_cat = demo_test[target_cat].values
 ```
 
-Standardize the features
+The train and test datasets are prepared. Note that two targets have been chosen: `log_size_mean` and `size_cat`; the former will be used as the target for regression, and the latter the target for categorization.
 
 ```{python}
 ss = StandardScaler()
@@ -539,18 +581,11 @@ X_train = ss.fit_transform(X_train)
 X_test = ss.transform(X_test)
 ```
 
-### Regression
+The features are standardized.
 
-```{python}
-# problemname_cols = demo_data.columns.str.startswith("problemname")
+### Generalized Linear Models (GLMs)
 
-# demo_data_one_problem = demo_data_clean[demo_data_clean["issues"].apply(lambda x:len(x) == 1)]
-# demo_data_one_problem["one_problem"] = demo_data_one_problem["issues"].apply(lambda x:x[0])
-# sns.boxplot(x = 'problemname', y = target_cont, 
-#             hue = 'problemname',  
-#             data = demo_data)
-# plt.show()
-```
+#### Linear Regression
 
 ```{python}
 sns.lmplot(x = 'perc', y = target_cont,   
@@ -562,17 +597,17 @@ plt.title("Salience vs Log Mean Size")
 plt.show()
 ```
 
-#### Linear Model
-
 ```{python}
 ols_log_size_mean_by_perc = ols(formula = 'log_size_mean ~ perc', data = demo_data)
 ols_log_size_mean_by_perc_fit = ols_log_size_mean_by_perc.fit()
 print( ols_log_size_mean_by_perc_fit.summary() )
 ```
 
-Despite having an $R^2$ of 0.001, the $F$-statistic is at 11.73—highly significant. Indeed, both the intercept and perc have very small p-values.
+Evidence accumulates in support of a positive response to the SMART question as early as a simple linear regression with the percent of the population who would judge at least one of the issues at play to be a part of the Most Important Problem for that year being the only predictor.
 
-In other words, though the percent category labeled Most Important Problem that year does not explain nearly any of the variance in the log mean reported size of demonstrations, it is nevertheless explaining some of it.
+Despite having an $R^2$ of 0.001, the $F$-statistic is at 11.77—highly significant. Indeed, both the intercept and `perc` have very small p-values.
+
+In other words, though the salience of a category of issues does not explain nearly any of the variance in the log mean reported size of demonstrations, it is nevertheless explaining some of it.
 
 ```{python}
 ols_log_size_mean_by_perc_pop = ols(formula = 'log_size_mean ~ perc + DP05_0001PE', data = demo_data)
@@ -580,10 +615,10 @@ ols_log_size_mean_by_perc_pop_fit = ols_log_size_mean_by_perc_pop.fit()
 print( ols_log_size_mean_by_perc_pop_fit.summary() )
 ```
 
-Adding in population greatly boosts the predictive power.
+Adding in `DP05_0001PE`—total population—greatly boosts the predictive power, though, with two factors, the $R^2$ remains very low at 0.005.
 
 ```{python}
-# ols_log_size_mean_by_all = ols(formula = 'log_size_mean ~ .', data = demo_data)
+# ols_log_size_mean_by_all = ols(formula = 'log_size_mean ~ .', data = demo_data) # formula does not work, unlike in R
 # ols_log_size_mean_by_all_fit = ols_log_size_mean_by_all.fit()
 # print( ols_log_size_mean_by_all.summary() )
 ```
@@ -595,11 +630,11 @@ print("R^2 (with the test set):", demo_lm.score(X_test, y_test_cont))
 print("R^2 (with the train set):", demo_lm.score(X_train, y_train_cont))
 ```
 
-The linear model with all variables overfits; worse than the null model.
+The linear model with all variables overfits; with an $R^2$ of 0.04, it is barely better than the null model. If linear regression is to be used, dimensionality reduction must be performed.
 
-##### LASSO Regression
+#### LASSO Regression
 
-"The advantage of using a cross-validation estimator over the canonical estimator class along with grid search is that they can take advantage of warm-starting by reusing precomputed results in the previous steps of the cross-validation process. This generally leads to speed improvements" (https://scikit-learn.org/stable/glossary.html#term-cross-validation-estimator).
+For the purposes of LASSO regression, `LassoCV` is used in place of `GridSearchCV`: "The advantage of using a cross-validation estimator over the canonical estimator class along with grid search is that they can take advantage of warm-starting by reusing precomputed results in the previous steps of the cross-validation process. This generally leads to speed improvements" (scikit-learn, 2025).
 
 ```{python}
 demo_lasso = LassoCV(n_alphas=100, max_iter=10000, random_state=seed, n_jobs=6)
@@ -609,14 +644,25 @@ print('LASSO Regression model accuracy (with the test set):', demo_lasso.score(X
 print('LASSO Regression model accuracy (with the train set):', demo_lasso.score(X_train, y_train_cont))
 ```
 
+The `train` set could not be fit as tightly, but this is more than made up for by the massive improvement in the Coefficient of Determination with the `test` data.
+
 ```{python}
 # pd.DataFrame([feature_names, demo_lasso.coef_]).T.rename(columns={0:"var_name",1:"coef"}).set_index("var_name").sort_values(by="coef")
 
 lasso_coefs = pd.Series(demo_lasso.coef_,index=feature_names, name="coef")
 lasso_coefs_sort = pd.DataFrame([lasso_coefs,lasso_coefs.abs().rename("abs_coef")]).T.sort_values("abs_coef",ascending=False)
-lasso_coefs_sort = lasso_coefs_sort[lasso_coefs_sort["coef"] != 0]
-lasso_coefs_sort.head(60)
+lasso_coefs_sort = lasso_coefs_sort[lasso_coefs_sort["coef"] != 0].reset_index().rename(columns={"index":"feature"})
+lasso_coefs_sort_merged = lasso_coefs_sort.merge(census_vars[["VARIABLE","LABEL"]], how="left", left_on="feature", right_on="VARIABLE").drop(columns="VARIABLE").fillna("")
+lasso_coefs_sort_merged.head(20)
 ```
+
+It is clear that the type of demonstration and the relevant Most Important Problem category are very important to the success of this regression. `perc` itself also appears, lower on the list; however, it is clear that the topics themselves—outside of salience (as measured in this way)—hold the power.
+
+As for demographic variables, the total number of occupied housing units, as well as the percent that are occupied by their owners, both appear. Perhaps homeowners are more likely to demonstrate because they feel more integrated into their respective communities.
+
+There are also a few counties who are particularly demonstration-inclined or declined.
+
+The most prominent demographic variable is the percent of the adult population whose highest educational attainment is graduation from high school or its equivalent. Evidently, the lower this percent (and thereby the higher-educated the population at large is), the more people turn out. Perhaps those who have gone to college have a cultural impetus to protest.
 
 #### Logistic Regression
 
@@ -637,19 +683,83 @@ print('Logit model accuracy (with the test set):', demo_logit.score(X_test, y_te
 print('Logit model accuracy (with the train set):', demo_logit.score(X_train, y_train_cat))
 ```
 
+Multinomial logistic regression is not particularly accurate at predicting the magnitude of a crowd. Evidently, it is easier to approach the correct number than to get its magnitude exactly.
+
+Even so, it is interesting to note that the model is less overfit here than for linear regression without LASSO.
+
+#### Primary Component Analysis (PCA)
+
+```{python}
+# # PCA Computations
+# X_avg = np.mean(X_train, axis = 0)
+# B = X_train - np.tile(X_avg, (len(X_train), 1))
+
+# U, S, VT = np.linalg.svd(B / np.sqrt(len(X_train)), full_matrices=True)
+# V = VT.T
+
+# #t = np.arange(0, 1, 0.1)
+# # plt.plot(t, V[1, 0]/V[0, 0] * t)
+# # plt.plot(t, V[1, 1]/V[0, 1] * t)
+# plt.quiver([X_avg[0], X_avg[0]], [X_avg[1],X_avg[1]], V[0,:], V[1,:], scale=8, zorder=2, color=['b', 'r'])
+# plt.show()
+
+# theta = 2 * np.pi * np.arange(0, 1, 0.01)
+# Xstd = np.array([np.cos(theta), np.sin(theta)]).T @ np.diag(S) @ VT
+
+# plt.plot(X_avg[0] +     Xstd[:, 0], X_avg[1] +     Xstd[:,1])
+# plt.plot(X_avg[0] + 2 * Xstd[:, 0], X_avg[1] + 2 * Xstd[:,1])
+# plt.plot(X_avg[0] + 3 * Xstd[:, 0], X_avg[1] + 3 * Xstd[:,1])
+# plt.show()
+```
+
+```{python}
+demo_pca = PCA(n_components=0.95)  # Retain 95% of variance
+demo_pca.fit(X_train)
+
+X_train_pca = demo_pca.transform(X_train)
+X_test_pca = demo_pca.transform(X_test)
+```
+
+##### Linear Regression with PCA
+
+```{python}
+pca_lm = LinearRegression()
+pca_lm.fit(X_train_pca,y_train_cont)
+
+print("R^2 (with the test set):", pca_lm.score(X_test_pca, y_test_cont))
+print("R^2 (with the train set):", pca_lm.score(X_train_pca, y_train_cont))
+```
+
+Though nearly doubling the Coefficient of Determination, linear regression with PCA nevertheless still overfits. In terms of dimensionality reduction, LASSO does a much better job.
+
+##### Logistic Regression with PCA
+
+```{python}
+pca_logit = LogisticRegression(penalty="l2", C=1, random_state=seed, max_iter=10000)
+pca_logit.fit(X_train_pca,y_train_cat)
+
+# Cross-validation
+grid_logit = GridSearchCV(pca_logit, {'C': [0.001, 0.01, 0.1, 1, 5, 10, 100]}, cv = kfold, scoring = "accuracy", n_jobs=6)
+grid_logit.fit(X_train_pca, y_train_cat)
+
+print( grid_logit.best_params_ )
+print( grid_logit.cv_results_[('mean_test_score')] )
+
+pca_logit = grid_logit.best_estimator_
+
+print('Logit model accuracy (with the test set):', pca_logit.score(X_test_pca, y_test_cat))
+print('Logit model accuracy (with the train set):', pca_logit.score(X_train_pca, y_train_cat))
+```
+
+Here, the accuracy with the test data is worse with PCA than without it.
+
 ### Tree
 
 #### Regression Tree
 
 ```{python}
 demo_dtr = DecisionTreeRegressor(max_depth=3, random_state=seed)
-demo_dtr.fit(X_train,y_train_cont)
-demo_dtr.score(X_test,y_test_cont)
-```
 
-Run cross-validation to choose the best `max_depth` and `criterion`.
-
-```{python}
 param_grid_dtr = {'max_depth': range(3, 15)}
                  #'criterion':('absolute_error', 'squared_error', 'friedman_mse', 'poisson')} 
 # Cross-validation
@@ -662,16 +772,11 @@ demo_dtr = grid_dtr.best_estimator_
 ```
 
 ```{python}
-demo_dtr.score(X_test,y_test_cont)
+print("R^2 (with the test set):", demo_dtr.score(X_test, y_test_cont))
+print("R^2 (with the train set):", demo_dtr.score(X_train, y_train_cont))
 ```
 
-Tree does decently well, even on the test data.
-
-```{python}
-plt.figure(dpi=1000,figsize=(9,3))
-plot_tree(demo_dtr, feature_names = np.setdiff1d(demo_train.columns, targets), filled=True, max_depth=2)
-plt.show()
-```
+The regression tree does well, even on the test data.
 
 ```{python}
 plt.figure(dpi=1000,figsize=(15,3))
@@ -679,7 +784,7 @@ plot_tree(demo_dtr, feature_names = np.setdiff1d(demo_train.columns, targets), f
 plt.show()
 ```
 
-`type_protest`, `type_march`, and `perc` were the three most important variables. Other important ones include `DP03_0087PE` (Mean family income in 2024 inflation-adjusted dollars)—higher has larger crowds—and `DP04_0088PE` (Percent of owner-occupied units that are worth $1,000,000 or more)—higher has larger crowds.
+`type_protest`, `type_march`, and `perc` were the three most important variables, with `DP02_0067PE` not far behind. `DP02_0067PE` is the percent of the adult population whose highest educational attainment is graduation from high school (or equivalent) or beyond, and the less-educated a population is, the smaller demonstrations in the area are likely to be. This lends further weight to educational attainment's high position in the LASSO regression.
 
 #### Classification Tree
 
@@ -706,20 +811,16 @@ demo_dtc.score(X_test,y_test_cat)
 ```
 
 ```{python}
-plt.figure(dpi=1000,figsize=(7.5,3))
-plot_tree(demo_dtc, feature_names = np.setdiff1d(demo_train.columns, targets), filled=True, max_depth=2)
-plt.show()
-```
-
-```{python}
 plt.figure(dpi=1000,figsize=(21,3))
 plot_tree(demo_dtc, feature_names=np.setdiff1d(demo_train.columns, targets), filled=True)
 plt.show()
 ```
 
-`type_protest`, `type_walk-out`, `walk-out`, and `perc` were the three most important variables. Other important ones include `type_march`, `problemname_Social Policy`.
+`type_march`, `type_walk-out`, and `DP02_0064PE` are the three most important variables. Again, an educational attainment variable is significant: this time, it is the percent of the adult population whose highest educational attainment is an Associate's degree.
 
-Interesting to note are `DP02_0123PE` (percent of the population 5 years or older that speaks a language at home other than English and that speaks English less than "very well")—higher percents have larger protests—and `DP02_0031PE` (percent of females 15 years old or older who are married)—higher percents have larger protests.
+Other important variables include other `type`s, `problem`s, `DP05_0029PE`, and `DP03_0109PE`. `DP05_0029PE` is the percent of the population who are 65 years old or older, with higher levels of those of advanced age associated with larger protests, while `DP03_0109PE` is the percent of the population who are unemployed, with higher levels of unemployment associated with larger protests. Perhaps those who are unemployed or retired have more free time to protest.
+
+`perc` does also make an appearance, but lower down.
 
 ### Random Forest
 
@@ -746,10 +847,10 @@ print( grid_rfr.cv_results_[('mean_test_score')] )
 demo_rfr = grid_rfr.best_estimator_
 ```
 
-Best: max depth 9, 30 estimators
+Best: max depth 7, 30 estimators
 
 ```{python}
-demo_rfr.score(X_test, y_test_cont)
+print("R^2 (with the test data):", demo_rfr.score(X_test, y_test_cont) )
 ```
 
 ```{python}
@@ -759,7 +860,9 @@ rfr_feature_imp = rfr_feature_imp.merge(census_vars[["VARIABLE","LABEL"]], how="
 rfr_feature_imp.head(20)
 ```
 
-New information: `DP02_0064PE` (percent of the population 25 years old or older that has graduated from high school or the equivalent) and `DP02_0061PE` (percent of the population 25 years old or older that has a 9th–12th-grade education without a high school diploma) are also important, as is local effects (a la the categorical `FIPS Code`). Rounding out the top 20 are `DP03_0085PE` (percent of families whose income and benefits (in 2024 inflation-adjusted dollars) equal or exceed $200,000), `DP02_0065PE
+When the variables are ranked by importance, again, `type`s head the list, with `perc` in third place and different `problem`s not far below that. Educational attainment again makes an appearance, with the strongest support yet for the college culture hypothesis: this time, with the highest $R^2$ thus far, the variable chosen is those with a Bachelor's degree or higher. In addition, those of advanced age and not in the labor force are also important.
+
+The percent of the population between 25 and 34 years old ranks quite highly, as well; perhaps those of that age are another population likely to protest.
 
 #### Random Forest Classification
 
@@ -782,7 +885,7 @@ demo_rfc = grid_rfc.best_estimator_
 ```
 
 ```{python}
-demo_rfc.score(X_test, y_test_cat)
+print("Accuracy (with the test data):", demo_rfc.score(X_test, y_test_cat) )
 ```
 
 ```{python}
@@ -792,9 +895,9 @@ rfc_feature_imp = rfc_feature_imp.merge(census_vars[["VARIABLE","LABEL"]], how="
 rfc_feature_imp.head(20)
 ```
 
-Here, we see entirely different demographic variables: for some reason, the percent of occupied housing units moved into in different decades continuese to be significant.
+For the categorical random forest, `type`s, `problem`s, and `perc` again are found towards the top, but we see entirely different demographic variables: for some reason, the percent of occupied housing units moved into in different decades is significant, as is mean family income and median income for female full-time workers. Perhaps those who are more settled feel more comfortable protesting. As for income, no conclusion can readily be made; it is unclear from importance whether or not the correlation is positive or negative.
 
-### K Nearest Neighbors
+### K Nearest Neighbors (KNN)
 
 #### K Nearest Neighbors Regression
 
@@ -811,10 +914,10 @@ demo_knnr=grid_knnr.best_estimator_
 ```
 
 ```{python}
-demo_knnr.score(X_test, y_test_cont)
+print("R^2 (with the test data):", demo_knnr.score(X_test, y_test_cont) )
 ```
 
-KNN tried its best, but it is not the correct model to use here.
+With a Coefficient of Determination of 0.008, KNN is simply not the correct model to use here.
 
 #### K Nearest Neighbors Classification
 
@@ -830,25 +933,28 @@ demo_knnc=grid_knnc.best_estimator_
 ```
 
 ```{python}
-demo_knnc.score(X_test, y_test_cat)
+print("Accuracy (with the test data):", demo_knnc.score(X_test, y_test_cat) )
 ```
 
-Barely better than chance.
+Here, KNN is worse than pure chance.
 
 ## Model Evaluation
 
-### Check performance metrics like Accuracy, Precision, F1-score, Recall.
+### Classifier Evaluation
+
+#### Performance Metrics
 
 ```{python}
 print("Logit Classification\n", classification_report( y_test_cat, demo_logit.predict(X_test), zero_division=0.0 ) )
+print("Logit Classification with PCA\n", classification_report( y_test_cat, pca_logit.predict(X_test_pca) ) )
 print("Decision Tree Classification\n", classification_report( y_test_cat, demo_dtc.predict(X_test), zero_division=0.0 ) )
 print("Random Forest Classification\n", classification_report( y_test_cat, demo_rfc.predict(X_test), zero_division=0.0 ) )
 print("K Nearest Neighbors Classification\n", classification_report( y_test_cat, demo_knnc.predict(X_test), zero_division=0.0 ) )
 ```
 
-Recall of the biggest demonstration sizes is more important here, as it is better to allocate resources where they are not needed than to not when they are necessary. As such, though the best logistic regression model has a lower overall accuracy than the best decision tree classifier, as it is slightly better at predicting those larger demonstration sizes, that looks to be the best model.
+Recall of the biggest demonstration sizes is more important here, as it is better to allocate resources where they are not needed than to not when they are necessary. As such, the best decision tree classifier, with the highest accuracy and the second-best recall of Classes 3 and 4, looks to be the second-best model; although the logistic regression with PCA resulted in slightly worse accuracy than without it and than the best decision tree classifier, due to its better results for those larger crowd sizes, that should be taken as the best model for classification.
 
-### Plot the One vs. Rest multiclass ROC-AUC curves for the best trained classifiers
+#### One vs. Rest multiclass ROC-AUC curves
 
 ROC-AUC can only be applied to binary classifiers. As such, a One vs. Rest strategy may be used, plotting multiple curves: one for each class, where a failure is a classification of any of the others.
 
@@ -875,10 +981,10 @@ def OvR_ROC_AUC(X_test, y_test_onehot, cat_model, cat_model_name, classes, class
     plt.show()
 
 OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_logit, cat_model_name="Logistic", classes=label_binarizer.classes_, class_names=class_names)
+OvR_ROC_AUC(X_test_pca, y_test_cat_onehot, cat_model=pca_logit, cat_model_name="PCA Logistic", classes=label_binarizer.classes_, class_names=class_names)
 OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_dtc, cat_model_name="Tree", classes=label_binarizer.classes_, class_names=class_names)
 OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_rfc, cat_model_name="Random Forest", classes=label_binarizer.classes_, class_names=class_names)
 OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_knnc, cat_model_name="KNN", classes=label_binarizer.classes_, class_names=class_names)
-
 
 
 # # Logit
@@ -906,9 +1012,15 @@ OvR_ROC_AUC(X_test, y_test_cat_onehot, cat_model=demo_knnc, cat_model_name="KNN"
 # plt.show()
 ```
 
-Judging by the ROC-AUC curves, the best decision tree would appear to be the best model. It is the worst at predicting Class 1s, but as that is the smallest class, it is the least essential to distribute resources appropriately for.
+Judging by the ROC-AUC curves, the best decision tree classifier would appear to be the best model. It is the worst at predicting Class 1s, but as that is the smallest class, it is the least essential to distribute resources appropriately for.
 
-### Plot the residuals for the best trained regressors
+It is worth comparing the logistic regression with the full dataset vs. the one flattened by PCA. Despite PCA being useful in the case of linear regression, for logistic regression, it instead produces worse results here for Classes 3 and 4, contradicting the results from the classification tables above.
+
+Between these two evaluations, the best decision tree classifier could be judged the best classification model.
+
+### Regressor Evaluation
+
+### Residuals
 
 ```{python}
 # linear model
@@ -917,6 +1029,22 @@ plt.axhline(y=0, color='r', linestyle='--')
 plt.xlabel("True Value")
 plt.ylabel('Residual')
 plt.title("Linear Model Residuals")
+plt.show()
+
+# LASSO
+plt.scatter(y_test_cont, y_test_cont - demo_lasso.predict(X_test))
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("True Value")
+plt.ylabel('Residual')
+plt.title("LASSO Residuals")
+plt.show()
+
+# linear model with PCA
+plt.scatter(y_test_cont, y_test_cont - pca_lm.predict(X_test_pca))
+plt.axhline(y=0, color='r', linestyle='--')
+plt.xlabel("True Value")
+plt.ylabel('Residual')
+plt.title("Linear Model with PCA Residuals")
 plt.show()
 
 # tree
@@ -946,83 +1074,58 @@ plt.show()
 
 The residuals all have a clear direction. The linear model appears flattest, but only because it is squashed to show all of the residuals.
 
+### Coefficients of Determination
+
 ```{python}
 print("R^2 With the Test Data")
 print(f"Linear Model: {demo_lm.score(X_test,y_test_cont):.2f}")
+print(f"LASSO: {demo_lasso.score(X_test,y_test_cont):.2f}")
+print(f"Linear Model with PCA: {pca_lm.score(X_test_pca,y_test_cont):.2f}")
 print(f"Decision Tree: {demo_dtr.score(X_test,y_test_cont):.2f}")
 print(f"Random Forest: {demo_rfr.score(X_test,y_test_cont):.2f}")
 print(f"K Nearest Neighbors: {demo_knnr.score(X_test,y_test_cont):.2f}")
 ```
 
-Random Forest explains the most variance. The linear model is worse than the null model, and the KNN regressor is not far off.
+The best Random Forest model explains the most variance. The linear model with PCA explains twice the variance of the linear model without it, though LASSO did better in the category of dimensionality reduction. The KNN regressor, meanwhile, barely accounts for anything.
 
-## Dimensionality Reduction
+Based on these results, the best random forest regressor may be judged the best regression model.
 
-### Primary Component Analysis
+## Conclusions
 
-```{python}
-# PCA Computations
-# X_avg = np.mean(X_train, axis = 0)
-# B = X_train - np.tile(X_avg, (len(X_train), 1))
+At the beginning of this project, it was unknown whether or not the SMART question at hand could be answered. Now, at its end, though success was middling, success was found nonetheless. It is, indeed, possible to predict demonstration size with some success based on salience (as represented through the question of the Most Important Problem) and demographic information in the years 2017 and 2018.
 
-# U, S, VT = np.linalg.svd(B / np.sqrt(len(X_train)), full_matrices=True)
-# V = VT.T
+Some of the important demographic variables were expected: larger crowds were associated with higher percents of the popualation being of retirement age and/or unemployed. Others were less so: different levels of educational attainment repeatedly showed that, the more educated a populace is, the larger demonstrations are likely to be. This may be due to the cultural influence of university, but there are many hypotheses that could be made. For others, their absence is intriguing: total population was never close to the top, whereas it may naively be assumed to be the most important factor.
 
-# #t = np.arange(0, 1, 0.1)
-# # plt.plot(t, V[1, 0]/V[0, 0] * t)
-# # plt.plot(t, V[1, 1]/V[0, 1] * t)
-# plt.quiver([X_avg[0], X_avg[0]], [X_avg[1],X_avg[1]], V[0,:], V[1,:], scale=8, zorder=2, color=['b', 'r'])
-# plt.show()
+Lastly, the abject failure of K Nearest Neighbors is notable. Perhaps it is due to the fact that, though protesters may gather in the same places, that is no indication of that gathering's size.
 
-# theta = 2 * np.pi * np.arange(0, 1, 0.01)
-# Xstd = np.array([np.cos(theta), np.sin(theta)]).T @ np.diag(S) @ VT
+### Next Steps
 
-# plt.plot(Xavg[0] +     Xstd[:, 0], Xavg[1] +     Xstd[:,1])
-# plt.plot(Xavg[0] + 2 * Xstd[:, 0], Xavg[1] + 2 * Xstd[:,1])
-# plt.plot(Xavg[0] + 3 * Xstd[:, 0], Xavg[1] + 3 * Xstd[:,1])
-# plt.show()
-```
+Several ideas present themselves. The different types of crowds were the strongest predictor, but there is a chance that they are being assigned post-hoc by the journalists themselves. For instance, perhaps a small crowd is deemed a demonstration, whereas a large one is labeled a protest. If that is the case, such information would be useless in predicting the size of crowds in advance; these models should be redone without those factors.
 
-```{python}
-demo_pca = PCA(n_components=0.95)  # Retain 95% of variance
-demo_pca.fit(X_train)
+Interaction terms would be another avenue to pursue: for instance, year by problem or problem by county. Such would necessitate dimensionality reduction or a non-parametric model; but, as those are already the most successful models, this should not be a problem, though the increased compute time may be.
 
-X_train_pca = demo_pca.transform(X_train)
-X_test_pca = demo_pca.transform(X_test)
-```
+Additionally, the Most Important Problem may be broken down further. These categories are general, but the second version of the dataset extends to 110 different sub-categories ("The 'Most Important Problem' Dataset (MIPD): A New Dataset on American Issue Importance," n.d.; Yildirim & Williams, 2025); such analysis would also be interesting to perform.
 
-```{python}
-pca_lm = LinearRegression()
-pca_lm.fit(X_train_pca,y_train_cont)
+Most importantly, however, such information is quite delayed. The original interest in this subject came from the protests this year; 2018 was 7 years ago, and, importantly, pre-COVID-19. If predictions are to be made in any form of reasonable time period, more recent data must be used as a proxy for salience; for instance, data from Google Trends could be an interesting avenue to go down.
 
-print("R^2 (with the test set):", pca_lm.score(X_test_pca, y_test_cont))
-print("R^2 (with the train set):", pca_lm.score(X_train_pca, y_train_cont))
-```
+## References
 
-```{python}
-pca_logit = LogisticRegression(penalty="l2", C=1, random_state=seed, max_iter=10000)
-pca_logit.fit(X_train_pca,y_train_cat)
+Carey, Jr., T. E., Branton, R. P., & Martinez-Ebers, V. (2014). The Influence of Social Protests on Issue Salience among Latinos. *Political Research Quarterly, 67*(3), 615–627. https://doi.org/10.1177/1065912914534074
 
-# Cross-validation
-grid_logit = GridSearchCV(pca_logit, {'C': [0.001, 0.01, 0.1, 1, 5, 10, 100]}, cv = kfold, scoring = "accuracy", n_jobs=6)
-grid_logit.fit(X_train_pca, y_train_cat)
+Chenoweth, E., Pressman, J., & Ulfelder, J. (2025). *Crowd counting consortium U.S. protest event data, 2017-2020.* https://doi.org/10.7910/DVN/6OPP7H
 
-print( grid_logit.best_params_ )
-print( grid_logit.cv_results_[('mean_test_score')] )
+*Crowd Counting Consortium.* (2024, May 30). Ash Center. https://ash.harvard.edu/programs/crowd-counting-consortium/
 
-pca_logit = grid_logit.best_estimator_
+Heffington, C., Park, B. B., & Williams, L. K. (2017). The “Most Important Problem” Dataset (MIPD): a new dataset on American issue importance. *Conflict Management and Peace Science, 36*(3), 312-335. https://doi.org/10.1177/0738894217691463 (Original work published 2019) 
 
-print('Logit model accuracy (with the test set):', pca_logit.score(X_test_pca, y_test_cat))
-print('Logit model accuracy (with the train set):', pca_logit.score(X_train_pca, y_train_cat))
-```
+scikit-learn. (2025). *Glossary of common terms and API elements.* Scikit-Learn. https://scikit-learn.org/stable/glossary.html#term-cross-validation-estimator
 
-```{python}
-print("Logit Classification\n", classification_report( y_test_cat, pca_logit.predict(X_test_pca) ) )
-```
+Somma, N. M., & Medel, R. M. (2019). What makes a big demonstration? Exploring the impact of mobilization strategies on the size of demonstrations. *Social Movement Studies, 18*(2), 233–251. https://doi.org/10.1080/14742837.2018.1532285
 
-Slightly worse accuracy, at the advantage of a higher recall for Class 3 and 4.
+The 'Most Important Problem' Dataset (MIPD): A New Dataset on American Issue Importance, Release 1.0 REPLICATION, 1939 [Dataset]. Roper #31094159, Version 2. Not applicable [producer]. Cornell University, Ithaca, NY: Roper Center for Public Opinion Research [distributor]. doi:10.25940/ROPER-31094159 
 
-```{python}
-OvR_ROC_AUC(X_test_pca, y_test_cat_onehot, cat_model=pca_logit, cat_model_name="PCA Logistic", classes=label_binarizer.classes_, class_names=class_names)
-```
+U.S. Census Bureau. (2017). *American Community Survey 1-year estimates: Data Profiles* [Data set]. https://api.census.gov/data/2017/acs/acs1/profile (Accessed December 12, 2025). 
 
+U.S. Census Bureau. (2018). American Community Survey 1-year estimates: Data Profiles [Data set]. https://api.census.gov/data/2017/acs/acs1/profile (Accessed December 12, 2025). 
+
+Yildirim, T. M., & Williams, L. K. (2025). Problem importance across time and space: updating the “Most Important Problem Dataset.” *Journal of Elections, Public Opinion and Parties, 35*(4), 517–532. https://doi.org/10.1080/17457289.2024.2337424 
